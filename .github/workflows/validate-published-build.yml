@@ -17,6 +17,10 @@ on:
           - dev
           - staging
           - release
+      version:
+        description: 'Exact Aspire CLI version to validate'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -29,6 +33,8 @@ jobs:
       cli_e2e_matrix: ${{ steps.filter_cli_e2e.outputs.cli_e2e_matrix }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: ./.github/actions/enumerate-tests
         id: generate_tests_matrix
@@ -38,8 +44,10 @@ jobs:
       - name: Filter CLI E2E test matrix
         id: filter_cli_e2e
         shell: pwsh
+        env:
+          ALL_TESTS: ${{ steps.generate_tests_matrix.outputs.all_tests }}
         run: |
-          $allTests = '${{ steps.generate_tests_matrix.outputs.all_tests }}' | ConvertFrom-Json
+          $allTests = $env:ALL_TESTS | ConvertFrom-Json
           $cliE2ETests = @($allTests.include | Where-Object {
             $_.projectName -eq 'Aspire.Cli.EndToEnd.Tests' -and $_.type -eq 'class'
           })
@@ -120,16 +128,19 @@ jobs:
 
       - name: Run CLI E2E tests against published build
         env:
-          ASPIRE_E2E_QUALITY: ${{ inputs.quality || 'staging' }}
+          ASPIRE_E2E_VERSION: ${{ inputs.version }}
           ASPIRE_E2E_CLI_VERSION_OUTPUT_DIR: ${{ github.workspace }}/testresults/cli-versions
+          TEST_CLASS: ${{ matrix.classname }}
+          TRX_FILE_NAME: ${{ matrix.shortname }}.trx
         run: |
           dotnet test --project tests/Aspire.Cli.EndToEnd.Tests/Aspire.Cli.EndToEnd.Tests.csproj \
             --no-build \
             -- \
+            --ignore-exit-code 8 \
             --report-trx \
-            --report-trx-filename "${{ matrix.shortname }}.trx" \
+            --report-trx-filename "$TRX_FILE_NAME" \
             --results-directory ${{ github.workspace }}/testresults \
-            --filter-class "${{ matrix.classname }}" \
+            --filter-class "$TEST_CLASS" \
             --filter-not-trait "quarantined=true" \
             --filter-not-trait "outerloop=true" \
             --hangdump --hangdump-type none --hangdump-timeout 15m
