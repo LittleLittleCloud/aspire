@@ -599,5 +599,5 @@ extends:
           parameters:
             quality: $(validateQuality)
             version: $(aspireVersion)
-            workflowRef: $(validateWorkflowRef)
+            ref: $(validateWorkflowRef)
 

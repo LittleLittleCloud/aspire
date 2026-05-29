@@ -1,8 +1,8 @@
 # Single-job template that dispatches the validate-published-build GitHub
 # Actions workflow (fire-and-forget) for a given quality + version. Used by
 # both release-publish-nuget.yml (quality=release) and azure-pipelines.yml
-# (quality=staging) so the dispatch shape stays uniform across the release
-# and build pipelines.
+# (quality=staging | dev) so the dispatch shape stays uniform across the
+# release and build pipelines.
 #
 # The job is self-contained: it pulls in the Aspire-Release-Secrets variable
 # group itself, checks out the repo, and dispatches via the shared
@@ -16,14 +16,6 @@
 # telemetry / SBOM / publishing injection.
 
 parameters:
-  - name: jobName
-    type: string
-    default: DispatchValidatePublishedBuild
-
-  - name: displayName
-    type: string
-    default: 'Dispatch validate-published-build (fire-and-forget)'
-
   # Quality channel to validate. Must be one of dev / staging / release
   # (matches the validate-published-build.yml workflow's `quality` input
   # choices); not enforced as a template `values:` constraint here because
@@ -31,27 +23,30 @@ parameters:
   - name: quality
     type: string
 
-  # Exact CLI version to validate. Typically a $(varName) macro that resolves
-  # at runtime to the build's computed version (e.g. $(aspireVersion) in the
-  # main build pipeline, $(ReleaseVersionEffective) in the release pipeline).
+  # Exact CLI version to validate. Forwarded to the GitHub workflow's
+  # `version` input where it becomes ASPIRE_E2E_VERSION for the CLI E2E
+  # tests, which pass it to `get-aspire-cli --version` to install and
+  # exercise that specific build. Typically a $(varName) macro that
+  # resolves at runtime to the build's computed version
+  # (e.g. $(aspireVersion) in the main build pipeline,
+  # $(ReleaseVersionEffective) in the release pipeline).
   - name: version
     type: string
 
-  # Ref the dispatched workflow YAML is loaded from. Workflow *source* only —
-  # does not affect what gets validated. Defaults to 'main' so workflow fixes
-  # don't require backporting to every release branch.
-  - name: workflowRef
+  # Git ref on microsoft/aspire that GitHub Actions loads the
+  # validate-published-build.yml workflow source from when servicing the
+  # dispatch. This is the *workflow source*, not what's being validated
+  # (the version input controls that). Defaults to 'main'; release-branch
+  # callers set this to the matching release/X.Y so they exercise the
+  # workflow YAML shipped in that branch.
+  - name: ref
     type: string
     default: main
 
-  - name: timeoutInMinutes
-    type: number
-    default: 15
-
 jobs:
-  - job: ${{ parameters.jobName }}
-    displayName: ${{ parameters.displayName }}
-    timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
+  - job: DispatchValidatePublishedBuild
+    displayName: 'Dispatch validate-published-build (fire-and-forget)'
+    timeoutInMinutes: 15
     pool:
       name: NetCore1ESPool-Internal
       image: windows.vs2026preview.scout.amd64
@@ -70,7 +65,7 @@ jobs:
       - template: /eng/pipelines/templates/dispatch-github-workflow-steps.yml@self
         parameters:
           workflowFile: validate-published-build.yml
-          workflowRef: ${{ parameters.workflowRef }}
+          workflowRef: ${{ parameters.ref }}
           noWait: true
           dispatchStepDisplayName: 'Dispatch validate-published-build (quality=${{ parameters.quality }})'
           inputs:

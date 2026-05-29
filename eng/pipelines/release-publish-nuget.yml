@@ -1090,8 +1090,7 @@ extends:
         jobs:
           - template: /eng/pipelines/templates/dispatch-validate-published-build-job.yml@self
             parameters:
-              jobName: DispatchValidatePublishedBuildJob
               quality: release
               version: $(ReleaseVersionEffective)
-              workflowRef: $(ValidatePublishedBuildWorkflowRefEffective)
+              ref: $(ValidatePublishedBuildWorkflowRefEffective)
 
