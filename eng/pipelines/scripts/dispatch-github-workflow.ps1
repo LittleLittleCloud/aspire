@@ -1,10 +1,14 @@
-# Dispatches the release-github-tasks.yml workflow on microsoft/aspire as the
-# aspire-repo-bot GitHub App, then polls the resulting run until it completes.
-# Exits 0 only if the dispatched run concludes with 'success'.
+# Dispatches a GitHub Actions workflow on a target repository as the
+# aspire-repo-bot GitHub App. By default, polls the resulting run until it
+# completes and exits 0 only if the dispatched run concludes with 'success'.
+# With -NoWait, dispatches and exits 0 immediately without resolving or
+# polling the run (fire-and-forget).
 #
-# This script is invoked from the AzDO release-publish-nuget pipeline as the
-# final stage of a release. It centralizes the workflow dispatch, run-id
-# resolution, and run polling so the pipeline YAML stays declarative.
+# This script is invoked from AzDO release pipelines to trigger downstream
+# GitHub Actions workflows (e.g. release-github-tasks.yml after a GA release,
+# validate-published-build.yml after a staging/release publish). It centralizes
+# workflow dispatch, run-id resolution, and run polling so the pipeline YAML
+# stays declarative.
 #
 # Authentication (mint a GitHub App installation access token) is delegated to
 # Get-AspireBotInstallationToken.ps1 so the same flow can be reused by other
@@ -13,9 +17,10 @@
 # Dispatch + correlation flow (per GitHub API docs):
 #   https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app
 #   1. POST /repos/{owner}/{repo}/actions/workflows/{file}/dispatches with the installation token.
-#   2. Poll GET /repos/.../actions/runs filtered by workflow + branch to find the run we just queued
-#      (workflow_dispatch does not return a run id directly — this is the documented workaround).
-#   3. Poll the run until status=completed; succeed only if conclusion=success.
+#   2. (wait mode only) Poll GET /repos/.../actions/runs filtered by workflow + branch to find the
+#      run we just queued (workflow_dispatch does not return a run id directly — this is the
+#      documented workaround).
+#   3. (wait mode only) Poll the run until status=completed; succeed only if conclusion=success.
 
 [CmdletBinding()]
 param(
@@ -27,7 +32,12 @@ param(
     [Parameter(Mandatory = $true)][string]$Ref,
     [Parameter(Mandatory = $true)][hashtable]$Inputs,
     [Parameter()][int]$PollIntervalSeconds = 30,
-    [Parameter()][int]$PollTimeoutMinutes = 60
+    [Parameter()][int]$PollTimeoutMinutes = 60,
+    # When set, dispatch and exit immediately without resolving the dispatched run id or
+    # polling for completion. The caller treats the GH workflow as informational signal
+    # rather than a gate. Use when the dispatching pipeline should not block on (or fail
+    # because of) the downstream workflow.
+    [Parameter()][switch]$NoWait
 )
 
 $ErrorActionPreference = 'Stop'
@@ -94,6 +104,15 @@ Invoke-GitHubApi -Method POST `
     -Token $installationToken `
     -Body $dispatchBody | Out-Null
 Write-Host "✓ Workflow dispatch accepted."
+
+if ($NoWait) {
+    # Fire-and-forget: don't try to resolve a run id or poll. Surface a link to the
+    # workflow runs page so operators can find the dispatched run manually.
+    $runsListUrl = "https://github.com/$Owner/$Repo/actions/workflows/$WorkflowFile"
+    Write-Host "##[section]Dispatched (no wait). See recent runs: $runsListUrl"
+    Write-Host "##vso[task.setvariable variable=DispatchedRunsUrl]$runsListUrl"
+    exit 0
+}
 
 # Resolve the run id. The dispatched run is not always queryable instantly,
 # so retry for up to 2 minutes. Filter by created>=dispatchedAt-30s to allow for

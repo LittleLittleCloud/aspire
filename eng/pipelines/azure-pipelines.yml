@@ -527,3 +527,69 @@ extends:
                 version: $(aspireVersion)
                 channel: $(installerChannel)
                 archiveRoot: $(Pipeline.Workspace)/native-archives
+
+    # Fire-and-forget dispatch of the validate-published-build GitHub Actions
+    # workflow once installer prep has succeeded. Runs the CLI E2E suite
+    # against the channel that this build just published to (dev for main,
+    # staging for release/* and internal/release/*) as a post-build smoke
+    # signal that complements the in-pipeline installer validation.
+    #
+    # Why this comes after prepare_installers: when _PackagesPublished=true,
+    # prepare_installers runs Full validation in both the WinGet and Homebrew
+    # jobs (real `winget install --manifest` / `brew install --cask` against
+    # the live ci.dot.net URLs). It therefore won't succeed until the
+    # darc/Maestro publish has completed and the URLs are reachable — making
+    # it a reliable signal that the channel is ready for validate-published-
+    # build to download from.
+    #
+    # Fire-and-forget rationale: this is informational signal, not a gate.
+    # Blocking the build pipeline on a CLI E2E run that's susceptible to
+    # transient GH Actions/Docker/test flakiness would punish every
+    # production-branch build for noise unrelated to the build itself. The
+    # dispatched run URL is surfaced via the workflow's runs page; if it
+    # fails, re-run it manually from the GitHub Actions UI.
+    #
+    # Gated to _PackagesPublished=true: that combined gate (non-PR + internal +
+    # production branch) already covers exactly the builds that produce a
+    # channel upload — main → daily, release/* + internal/release/* → staging.
+    - stage: dispatch_validate_published_build
+      displayName: Dispatch Validate Published Build
+      dependsOn:
+        - build
+        - prepare_installers
+      variables:
+        # Pulled from the computeVersion step in build_sign_native.yml's
+        # Windows job (matches prepare_installers' lookup above). Materialized
+        # at stage scope so it's visible to the dispatch-validate-published-
+        # build-job template's job body where the macro is expanded.
+        - name: aspireVersion
+          value: $[ stageDependencies.build.Windows.outputs['computeVersion.aspireVersion'] ]
+        # Quality channel derives from the source branch: main publishes to
+        # 'daily' (quality=dev) per build_sign_native.yml; release branches
+        # publish to 'staging' (quality=staging). Computed at template time
+        # because Build.SourceBranch is fixed for the run.
+        - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
+          - name: validateQuality
+            value: dev
+        - ${{ else }}:
+          - name: validateQuality
+            value: staging
+        # Match the dispatched workflow's ref to the branch we're building.
+        # Strip 'refs/heads/' to get the bare branch name, then strip the
+        # 'internal/' prefix so internal/release/X.Y mirrors point at the
+        # public release/X.Y branch where the workflow YAML lives. main and
+        # release/X.Y pass through unchanged.
+        - name: validateWorkflowRef
+          value: ${{ replace(replace(variables['Build.SourceBranch'], 'refs/heads/', ''), 'internal/', '') }}
+      condition: |
+        and(
+          in(dependencies.prepare_installers.result, 'Succeeded', 'SucceededWithIssues'),
+          eq(variables['_PackagesPublished'], 'true')
+        )
+      jobs:
+        - template: /eng/pipelines/templates/dispatch-validate-published-build-job.yml@self
+          parameters:
+            quality: $(validateQuality)
+            version: $(aspireVersion)
+            workflowRef: $(validateWorkflowRef)
+

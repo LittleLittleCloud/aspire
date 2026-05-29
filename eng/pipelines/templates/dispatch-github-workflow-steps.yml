@@ -1,0 +1,134 @@
+# Reusable steps to dispatch a GitHub Actions workflow as the
+# aspire-repo-bot GitHub App via eng/pipelines/scripts/dispatch-github-workflow.ps1.
+#
+# Emits two steps:
+#   1. The pwsh dispatch step (builds the inputs hashtable, calls the script).
+#   2. A post-step that prints the dispatched run / runs URL surfaced by the
+#      script via ##vso[task.setvariable].
+#
+# Requirements on the caller's job:
+#   - The Aspire-Release-Secrets variable group must be in scope so
+#     $(aspire-bot-app-id) and $(aspire-bot-private-key) resolve. Include it
+#     at pipeline, stage, or job level — whichever has the narrowest
+#     appropriate scope (see release-publish-nuget.yml and azure-pipelines.yml
+#     for both patterns).
+#   - The repo must be checked out (the template references the dispatch
+#     script under $(Build.SourcesDirectory)).
+#
+# Inputs to the dispatched GitHub workflow are passed as an object mapping
+# of input-name → value (parameters.inputs). At template expansion the object
+# is serialized to JSON via AzDO's convertToJson() and exposed to the script
+# through an env var, so embedded quotes and other PowerShell-significant
+# characters in values are safe. AzDO macro syntax ($(varName)) inside values
+# is resolved by AzDO before the env mapping is materialized, so caller
+# values like `version: $(ReleaseVersionEffective)` work as expected.
+
+parameters:
+  - name: workflowFile
+    displayName: 'GitHub workflow file name (e.g. release-github-tasks.yml)'
+    type: string
+
+  - name: workflowRef
+    displayName: 'Ref to load the workflow YAML from (workflow source only — not what gets validated/released)'
+    type: string
+    default: main
+
+  - name: owner
+    type: string
+    default: microsoft
+
+  - name: repo
+    type: string
+    default: aspire
+
+  - name: inputs
+    displayName: 'Workflow inputs as a name → value object'
+    type: object
+    default: {}
+
+  # When true (default), the script returns immediately after dispatch without
+  # resolving or polling the resulting run. When false, the script polls until
+  # the dispatched run reaches a terminal state and fails this step if the
+  # conclusion is not 'success'.
+  - name: noWait
+    type: boolean
+    default: true
+
+  - name: pollTimeoutMinutes
+    type: number
+    default: 60
+
+  - name: dispatchStepDisplayName
+    type: string
+    default: ''
+
+steps:
+  # pwsh (not powershell): Get-AspireBotInstallationToken.ps1 (called by
+  # dispatch-github-workflow.ps1) uses RSA.ImportFromPem which only exists in
+  # .NET Core 3.0+ / .NET 5+, not in the .NET Framework runtime backing the
+  # legacy `powershell:` shorthand.
+  - pwsh: |
+      # The inputs object is serialized to JSON at template expansion time via
+      # AzDO's convertToJson() and passed through the env mapping below. Doing
+      # this via env avoids embedding the JSON literal into the script body,
+      # which would force a choice between PowerShell-quoting characters
+      # (fragile) or a here-string (whose '@ terminator must be at column 0
+      # and would break this block scalar's indentation).
+      $inputsObject = $env:DISPATCH_INPUTS_JSON | ConvertFrom-Json
+      $inputs = @{}
+      foreach ($prop in $inputsObject.PSObject.Properties) {
+        $inputs[$prop.Name] = [string]$prop.Value
+      }
+
+      $scriptArgs = @{
+        AppId         = $env:ASPIRE_BOT_APP_ID
+        PrivateKeyPem = $env:ASPIRE_BOT_PRIVATE_KEY
+        Owner         = '${{ parameters.owner }}'
+        Repo          = '${{ parameters.repo }}'
+        WorkflowFile  = '${{ parameters.workflowFile }}'
+        Ref           = '${{ parameters.workflowRef }}'
+        Inputs        = $inputs
+      }
+
+      ${{ if eq(parameters.noWait, true) }}:
+        $scriptArgs.NoWait = $true
+      ${{ if eq(parameters.noWait, false) }}:
+        $scriptArgs.PollTimeoutMinutes = ${{ parameters.pollTimeoutMinutes }}
+
+      & "$(Build.SourcesDirectory)/eng/pipelines/scripts/dispatch-github-workflow.ps1" @scriptArgs
+    ${{ if ne(parameters.dispatchStepDisplayName, '') }}:
+      displayName: ${{ parameters.dispatchStepDisplayName }}
+    ${{ if eq(parameters.dispatchStepDisplayName, '') }}:
+      displayName: 'Dispatch ${{ parameters.workflowFile }}'
+    env:
+      # Secrets must be mapped explicitly into env so PowerShell can read them;
+      # AzDO doesn't expose secret variables to scripts by default.
+      ASPIRE_BOT_APP_ID: $(aspire-bot-app-id)
+      ASPIRE_BOT_PRIVATE_KEY: $(aspire-bot-private-key)
+      # convertToJson runs at template expansion; the resulting JSON literal
+      # becomes the env var's value and is parsed by the script above. AzDO
+      # macro syntax ($(varName)) inside input values is expanded by AzDO
+      # before this env mapping is materialized.
+      DISPATCH_INPUTS_JSON: ${{ convertToJson(parameters.inputs) }}
+
+  # Surface the URL the script logged via ##vso[task.setvariable] so it lands
+  # in the AzDO log as a separate step (easier to spot than scanning the
+  # dispatch step's output). The two modes set different variable names because
+  # the wait mode resolves the specific run id while NoWait can only link to
+  # the workflow's runs page.
+  - ${{ if eq(parameters.noWait, true) }}:
+    - powershell: |
+        Write-Host ""
+        Write-Host "Dispatched runs page: $env:DISPATCHED_RUNS_URL"
+      displayName: 'Print dispatched runs URL'
+      condition: always()
+      env:
+        DISPATCHED_RUNS_URL: $(DispatchedRunsUrl)
+  - ${{ if eq(parameters.noWait, false) }}:
+    - powershell: |
+        Write-Host ""
+        Write-Host "Dispatched run: $env:DISPATCHED_RUN_URL"
+      displayName: 'Print dispatched run URL'
+      condition: always()
+      env:
+        DISPATCHED_RUN_URL: $(DispatchedRunUrl)

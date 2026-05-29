@@ -1,0 +1,78 @@
+# Single-job template that dispatches the validate-published-build GitHub
+# Actions workflow (fire-and-forget) for a given quality + version. Used by
+# both release-publish-nuget.yml (quality=release) and azure-pipelines.yml
+# (quality=staging) so the dispatch shape stays uniform across the release
+# and build pipelines.
+#
+# The job is self-contained: it pulls in the Aspire-Release-Secrets variable
+# group itself, checks out the repo, and dispatches via the shared
+# dispatch-github-workflow-steps template. Callers only own the surrounding
+# stage scheduling (dependsOn, condition, and any stage-level variables they
+# need to materialize the `version` parameter — typically a $(...) macro that
+# resolves at runtime).
+#
+# Not wrapped in Arcade's jobs.yml. The job runs a single pwsh dispatch and
+# exits; it does not produce build artifacts that benefit from Arcade's
+# telemetry / SBOM / publishing injection.
+
+parameters:
+  - name: jobName
+    type: string
+    default: DispatchValidatePublishedBuild
+
+  - name: displayName
+    type: string
+    default: 'Dispatch validate-published-build (fire-and-forget)'
+
+  # Quality channel to validate. Must be one of dev / staging / release
+  # (matches the validate-published-build.yml workflow's `quality` input
+  # choices); not enforced as a template `values:` constraint here because
+  # the caller may pass a $(...) macro that's only resolved at runtime.
+  - name: quality
+    type: string
+
+  # Exact CLI version to validate. Typically a $(varName) macro that resolves
+  # at runtime to the build's computed version (e.g. $(aspireVersion) in the
+  # main build pipeline, $(ReleaseVersionEffective) in the release pipeline).
+  - name: version
+    type: string
+
+  # Ref the dispatched workflow YAML is loaded from. Workflow *source* only —
+  # does not affect what gets validated. Defaults to 'main' so workflow fixes
+  # don't require backporting to every release branch.
+  - name: workflowRef
+    type: string
+    default: main
+
+  - name: timeoutInMinutes
+    type: number
+    default: 15
+
+jobs:
+  - job: ${{ parameters.jobName }}
+    displayName: ${{ parameters.displayName }}
+    timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
+    pool:
+      name: NetCore1ESPool-Internal
+      image: windows.vs2026preview.scout.amd64
+      os: windows
+    variables:
+      # Bot creds for the aspire-repo-bot GitHub App, scoped to this job.
+      # Harmless to re-include when the caller's pipeline already has the
+      # group at pipeline scope (release-publish-nuget.yml does); essential
+      # in pipelines that don't (azure-pipelines.yml).
+      - group: Aspire-Release-Secrets
+    steps:
+      - checkout: self
+        displayName: 'Checkout repo (for dispatch script)'
+        fetchDepth: 1
+
+      - template: /eng/pipelines/templates/dispatch-github-workflow-steps.yml@self
+        parameters:
+          workflowFile: validate-published-build.yml
+          workflowRef: ${{ parameters.workflowRef }}
+          noWait: true
+          dispatchStepDisplayName: 'Dispatch validate-published-build (quality=${{ parameters.quality }})'
+          inputs:
+            quality: ${{ parameters.quality }}
+            version: ${{ parameters.version }}
