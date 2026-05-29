@@ -318,6 +318,36 @@ internal sealed class CliInstallStrategy
     }
 
     /// <summary>
+    /// Returns a copy of this strategy with <see cref="ExpectedVersion"/> set to the given value.
+    /// Used to layer a post-install version assertion on top of selectors that don't otherwise know
+    /// what they should resolve to — chiefly <see cref="FromQuality"/>, where the install goes through
+    /// a channel alias (aka.ms/...) whose target can be stale. With ExpectedVersion set, the test
+    /// runs <c>aspire --version</c> after install and fails with <c>CLI_VERSION_MISMATCH:...</c>
+    /// when the channel resolved to something other than what the caller asked for.
+    /// </summary>
+    /// <remarks>
+    /// Does not validate the version string format — callers may pass any value the dispatcher
+    /// considers authoritative (the published version, a tag, etc.).
+    /// </remarks>
+    public CliInstallStrategy WithExpectedVersion(string expectedVersion)
+    {
+        if (string.IsNullOrEmpty(expectedVersion))
+        {
+            throw new ArgumentException("Expected version must be non-empty.", nameof(expectedVersion));
+        }
+
+        return new CliInstallStrategy(
+            Mode,
+            archivePath: ArchivePath,
+            quality: Quality,
+            version: Version,
+            archiveDir: ArchiveDir,
+            nupkgSourcePath: NupkgSourcePath,
+            includePrerelease: IncludePrerelease,
+            expectedVersion: expectedVersion);
+    }
+
+    /// <summary>
     /// Creates a PullRequest strategy when the environment contains PR metadata.
     /// </summary>
     public static CliInstallStrategy FromPullRequest()
@@ -424,9 +454,36 @@ internal sealed class CliInstallStrategy
     ///   8. GITHUB_PR_NUMBER + GITHUB_PR_HEAD_SHA → PullRequest
     ///   9. CI/GITHUB_ACTIONS → InstallScript (dev/daily)
     ///  10. Local fallback → InstallScript (latest GA)
+    ///
+    /// After a selector picks a strategy, <c>ASPIRE_E2E_EXPECTED_VERSION</c> — when set
+    /// and the chosen strategy does not already carry a deterministic ExpectedVersion —
+    /// is applied as an override so post-install <c>aspire --version</c> verification
+    /// asserts that specific version. This lets channel-based installs (e.g.
+    /// quality=staging) still fail when the channel resolves to the wrong version.
     /// </summary>
     /// <param name="log">Optional log callback (e.g. <c>output.WriteLine</c>) for tracing the detection logic.</param>
     public static CliInstallStrategy Detect(Action<string>? log = null)
+    {
+        var strategy = DetectInner(log);
+
+        // ASPIRE_E2E_EXPECTED_VERSION is an additive assertion knob on top of whatever
+        // mode the selectors above chose. It lets a caller install via a quality channel
+        // (which by itself does not know what it should resolve to) and still fail the
+        // test if the channel served the wrong version — catches "publish completed but
+        // channel pointer is stale". For selectors that already set ExpectedVersion
+        // (LocalArchive from the nupkg, DotnetTool with an explicit version) we leave
+        // the deterministic value in place rather than letting the env var override it.
+        var expectedOverride = Environment.GetEnvironmentVariable("ASPIRE_E2E_EXPECTED_VERSION");
+        if (!string.IsNullOrEmpty(expectedOverride) && strategy.ExpectedVersion is null)
+        {
+            log?.Invoke($"  → Override: ExpectedVersion={expectedOverride} (from ASPIRE_E2E_EXPECTED_VERSION)");
+            strategy = strategy.WithExpectedVersion(expectedOverride);
+        }
+
+        return strategy;
+    }
+
+    private static CliInstallStrategy DetectInner(Action<string>? log)
     {
         log?.Invoke("CLI install strategy detection starting...");
 

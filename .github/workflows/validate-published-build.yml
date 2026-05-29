@@ -1,8 +1,19 @@
 # Validates an Aspire CLI build after it has been published to a public channel.
 #
-# This workflow is dispatched by the Azure DevOps release build after publishing
-# and installer preparation complete. It intentionally runs every CLI E2E test
-# class as a separate GitHub Actions job so the shape matches PR validation.
+# This workflow is dispatched by the Azure DevOps build/release pipelines (see
+# eng/pipelines/templates/dispatch-validate-published-build-job.yml) once the
+# build has uploaded artifacts and propagated to the requested channel. It
+# intentionally runs every CLI E2E test class as a separate GitHub Actions job
+# so the shape matches PR validation.
+#
+# Inputs:
+#   - quality: channel to install from (dev / staging / release). The tests
+#     install via this channel so they exercise the same channel-resolution
+#     path real users hit.
+#   - version: the exact version the dispatcher believes the channel should now
+#     resolve to. Used as a post-install assertion (aspire --version must equal
+#     it after install) so a stale channel pointer fails the workflow loudly
+#     instead of silently testing yesterday's build.
 name: Validate Published Build
 
 on:
@@ -127,8 +138,17 @@ jobs:
         run: dotnet build tests/Aspire.Cli.EndToEnd.Tests/Aspire.Cli.EndToEnd.Tests.csproj
 
       - name: Run CLI E2E tests against published build
+        # Install via the channel (ASPIRE_E2E_QUALITY) rather than by version so
+        # the tests exercise the same channel-resolution path real users hit. The
+        # version input flows through ASPIRE_E2E_EXPECTED_VERSION so post-install
+        # `aspire --version` verification asserts the channel actually points at
+        # the build we asked about — catches "publish succeeded but channel
+        # pointer is stale" failures that a versioned install would silently mask
+        # (a versioned URL contains the version, so it cannot resolve to anything
+        # else).
         env:
-          ASPIRE_E2E_VERSION: ${{ inputs.version }}
+          ASPIRE_E2E_QUALITY: ${{ inputs.quality }}
+          ASPIRE_E2E_EXPECTED_VERSION: ${{ inputs.version }}
           ASPIRE_E2E_CLI_VERSION_OUTPUT_DIR: ${{ github.workspace }}/testresults/cli-versions
           TEST_CLASS: ${{ matrix.classname }}
           TRX_FILE_NAME: ${{ matrix.shortname }}.trx
