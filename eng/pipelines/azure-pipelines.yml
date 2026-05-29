@@ -529,18 +529,27 @@ extends:
                 archiveRoot: $(Pipeline.Workspace)/native-archives
 
     # Fire-and-forget dispatch of the validate-published-build GitHub Actions
-    # workflow once installer prep has succeeded. Runs the CLI E2E suite
-    # against the channel that this build just published to (dev for main,
-    # staging for release/* and internal/release/*) as a post-build smoke
-    # signal that complements the in-pipeline installer validation.
+    # workflow once the build stage's publishing has populated ci.dot.net.
+    # Runs the CLI E2E suite against the channel that this build just
+    # published to (dev for main, staging for release/* and internal/release/*)
+    # as a post-build smoke signal that complements the in-pipeline installer
+    # validation.
     #
-    # Why this comes after prepare_installers: when _PackagesPublished=true,
-    # prepare_installers runs Full validation in both the WinGet and Homebrew
-    # jobs (real `winget install --manifest` / `brew install --cask` against
-    # the live ci.dot.net URLs). It therefore won't succeed until the
-    # darc/Maestro publish has completed and the URLs are reachable — making
-    # it a reliable signal that the channel is ready for validate-published-
-    # build to download from.
+    # Why depending on `build` alone is sufficient: Arcade v3 publishing
+    # (enablePublishUsingPipelines: true on the build job) uploads native
+    # archives to ci.dot.net during the build stage itself, not in a separate
+    # post-build stage. `prepare_installers`' own Full validation
+    # (`winget install --manifest` / `brew install --cask` against
+    # https://ci.dot.net/public/aspire/{ver}/... in
+    # eng/winget/prepare-manifest-artifact.ps1 and the homebrew equivalent)
+    # works for the same reason, and it likewise only depends on `build`.
+    # validate-published-build.yml dispatches get-aspire-cli with --version,
+    # which hits the same versioned ci.dot.net path (see
+    # eng/scripts/get-aspire-cli.ps1's Get-AspireCliUrl versioned branch),
+    # so the build-stage upload is exactly the precondition the dispatched
+    # workflow needs. Running in parallel with prepare_installers — instead
+    # of after it — removes ~20–30 minutes of latency on the validation
+    # signal at no correctness cost.
     #
     # Fire-and-forget rationale: this is informational signal, not a gate.
     # Blocking the build pipeline on a CLI E2E run that's susceptible to
@@ -556,12 +565,11 @@ extends:
       displayName: Dispatch Validate Published Build
       dependsOn:
         - build
-        - prepare_installers
       variables:
         # Pulled from the computeVersion step in build_sign_native.yml's
-        # Windows job (matches prepare_installers' lookup above). Materialized
-        # at stage scope so it's visible to the dispatch-validate-published-
-        # build-job template's job body where the macro is expanded.
+        # Windows job. Materialized at stage scope so it's visible to the
+        # dispatch-validate-published-build-job template's job body where
+        # the macro is expanded.
         - name: aspireVersion
           value: $[ stageDependencies.build.Windows.outputs['computeVersion.aspireVersion'] ]
         # Quality channel derives from the source branch: main publishes to
@@ -583,7 +591,7 @@ extends:
           value: ${{ replace(replace(variables['Build.SourceBranch'], 'refs/heads/', ''), 'internal/', '') }}
       condition: |
         and(
-          in(dependencies.prepare_installers.result, 'Succeeded', 'SucceededWithIssues'),
+          in(dependencies.build.result, 'Succeeded', 'SucceededWithIssues'),
           eq(variables['_PackagesPublished'], 'true')
         )
       jobs:
