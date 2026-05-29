@@ -90,10 +90,18 @@ steps:
         Inputs        = $inputs
       }
 
-      ${{ if eq(parameters.noWait, true) }}:
+      # Branch on noWait at runtime via env var. AzDO does not allow template
+      # if-directives inside a string scalar (the |-block script body), so the
+      # choice between wait-mode and fire-and-forget is materialized here
+      # rather than at template expansion. AzDO emits booleans as 'True' /
+      # 'False'; use Convert.ToBoolean to normalize (matches the pattern in
+      # release-publish-nuget.yml DispatchGitHubTasksJob's inputs hashtable).
+      $noWait = [System.Convert]::ToBoolean($env:DISPATCH_NO_WAIT)
+      if ($noWait) {
         $scriptArgs.NoWait = $true
-      ${{ if eq(parameters.noWait, false) }}:
-        $scriptArgs.PollTimeoutMinutes = ${{ parameters.pollTimeoutMinutes }}
+      } else {
+        $scriptArgs.PollTimeoutMinutes = [int]$env:DISPATCH_POLL_TIMEOUT_MINUTES
+      }
 
       & "$(Build.SourcesDirectory)/eng/pipelines/scripts/dispatch-github-workflow.ps1" @scriptArgs
     ${{ if ne(parameters.dispatchStepDisplayName, '') }}:
@@ -110,6 +118,11 @@ steps:
       # macro syntax ($(varName)) inside input values is expanded by AzDO
       # before this env mapping is materialized.
       DISPATCH_INPUTS_JSON: ${{ convertToJson(parameters.inputs) }}
+      # Materialize noWait + pollTimeoutMinutes as env vars so the script body
+      # can branch on them at runtime (see the template-if-not-allowed-in-
+      # strings note above).
+      DISPATCH_NO_WAIT: ${{ parameters.noWait }}
+      DISPATCH_POLL_TIMEOUT_MINUTES: ${{ parameters.pollTimeoutMinutes }}
 
   # Surface the URL the script logged via ##vso[task.setvariable] so it lands
   # in the AzDO log as a separate step (easier to spot than scanning the
